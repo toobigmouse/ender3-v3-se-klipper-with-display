@@ -20,8 +20,8 @@ class GCodeRequestQueue:
         self.rqueue = []
         self.next_min_flush_time = 0.
         self.toolhead = None
-        motion_queuing = printer.load_object(config, 'motion_queuing')
-        motion_queuing.register_flush_callback(self._flush_notification)
+        self.motion_queuing = printer.load_object(config, 'motion_queuing')
+        self.motion_queuing.register_flush_callback(self._flush_notification)
         printer.register_event_handler("klippy:connect", self._handle_connect)
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
@@ -38,24 +38,30 @@ class GCodeRequestQueue:
                 pos += 1
             req_pt, req_val = rqueue[pos]
             # Invoke callback for the request
-            min_wait = 0.
             ret = self.callback(next_time, req_val)
             if ret is not None:
                 # Handle special cases
-                action, min_wait = ret
+                action, next_min_time = ret
+                self.next_min_flush_time = max(self.next_min_flush_time,
+                                               next_min_time)
                 if action == "discard":
                     del rqueue[:pos+1]
                     continue
-                if action == "delay":
+                if action == "reschedule":
+                    del rqueue[:pos]
+                    continue
+                if action == "repeat":
                     pos -= 1
             del rqueue[:pos+1]
-            self.next_min_flush_time = next_time + max(min_wait, min_sched_time)
+            self.next_min_flush_time = max(self.next_min_flush_time,
+                                           next_time + min_sched_time)
             # Ensure following queue items are flushed
-            self.toolhead.note_mcu_movequeue_activity(self.next_min_flush_time,
-                                                      is_step_gen=False)
+            self.motion_queuing.note_mcu_movequeue_activity(
+                self.next_min_flush_time, is_step_gen=False)
     def _queue_request(self, print_time, value):
         self.rqueue.append((print_time, value))
-        self.toolhead.note_mcu_movequeue_activity(print_time, is_step_gen=False)
+        self.motion_queuing.note_mcu_movequeue_activity(
+            print_time, is_step_gen=False)
     def queue_gcode_request(self, value):
         self.toolhead.register_lookahead_callback(
             (lambda pt: self._queue_request(pt, value)))
@@ -67,15 +73,20 @@ class GCodeRequestQueue:
         while 1:
             next_time = max(print_time, self.next_min_flush_time)
             # Invoke callback for the request
-            action, min_wait = "normal", 0.
+            action, next_min_time = "normal", 0.
             ret = self.callback(next_time, value)
             if ret is not None:
                 # Handle special cases
-                action, min_wait = ret
+                action, next_min_time = ret
+                self.next_min_flush_time = max(self.next_min_flush_time,
+                                               next_min_time)
                 if action == "discard":
                     break
-            self.next_min_flush_time = next_time + max(min_wait, min_sched_time)
-            if action != "delay":
+                if action == "reschedule":
+                    continue
+            self.next_min_flush_time = max(self.next_min_flush_time,
+                                           next_time + min_sched_time)
+            if action != "repeat":
                 break
 
 
